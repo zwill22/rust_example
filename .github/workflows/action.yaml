@@ -1,4 +1,4 @@
-name: Build Windows Executable
+name: Build Windows MSI Installer
 
 on:
   push:
@@ -58,6 +58,23 @@ jobs:
           cache-on-failure: true
           prefix-key: "v1-windows-cargo-home-d-drive"  # Unique cache key for D:\cargo
 
+      # Install WiX Toolset
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          # Download WiX binaries (v3.11 is stable and widely used)
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3112rtm/wix311-binaries.zip" -OutFile "wix311-binaries.zip"
+          Expand-Archive -Path "wix311-binaries.zip" -DestinationPath "wix"
+          # Add WiX to PATH
+          $env:PATH += ";$PWD\wix"
+          Write-Output "WiX Toolset installed and added to PATH"
+          # Verify WiX installation
+          candle.exe -h | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "WiX installation failed"
+            exit 1
+          }
+
       # Install Windows dependencies (if needed)
       - name: Install Windows dependencies
         shell: pwsh
@@ -83,14 +100,116 @@ jobs:
           }
           Write-Output "Executable found: target\release\zed.exe"
 
-      # Upload the executable as an artifact
-      - name: Upload executable artifact
+      # Create WiX configuration file
+      - name: Create WiX configuration
+        shell: pwsh
+        run: |
+          $wxsContent = @"
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+            <Product Id="*" Name="Zed" Language="1033" Version="0.1.0" Manufacturer="Zed Industries" UpgradeCode="YOUR-GUID-HERE">
+              <Package InstallerVersion="200" Compressed="yes" InstallScope="perMachine" />
+              <MajorUpgrade DowngradeErrorMessage="A newer version of Zed is already installed." />
+              <MediaTemplate EmbedCab="yes" />
+
+              <!-- Define directories -->
+              <Directory Id="TARGETDIR" Name="SourceDir">
+                <Directory Id="ProgramFilesFolder">
+                  <Directory Id="INSTALLFOLDER" Name="Zed" />
+                </Directory>
+                <Directory Id="ProgramMenuFolder">
+                  <Directory Id="ApplicationProgramsFolder" Name="Zed"/>
+                </Directory>
+              </Directory>
+
+              <!-- Define components -->
+              <DirectoryRef Id="INSTALLFOLDER">
+                <Component Id="ZedExecutable" Guid="*">
+                  <File Id="ZedExe" Source="target\release\zed.exe" KeyPath="yes" />
+                </Component>
+              </DirectoryRef>
+
+              <!-- Start menu shortcut -->
+              <DirectoryRef Id="ApplicationProgramsFolder">
+                <Component Id="ApplicationShortcut" Guid="*">
+                  <Shortcut Id="ApplicationStartMenuShortcut"
+                            Name="Zed"
+                            Description="Zed Editor"
+                            Target="[INSTALLFOLDER]zed.exe"
+                            WorkingDirectory="INSTALLFOLDER"/>
+                  <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall"/>
+                  <RegistryValue Root="HKCU"
+                                Key="Software\Zed Industries\Zed"
+                                Name="installed"
+                                Type="integer"
+                                Value="1"
+                                KeyPath="yes"/>
+                </Component>
+              </DirectoryRef>
+
+              <!-- Feature set -->
+              <Feature Id="MainFeature" Title="Zed" Level="1">
+                <ComponentRef Id="ZedExecutable" />
+                <ComponentRef Id="ApplicationShortcut" />
+              </Feature>
+            </Product>
+          </Wix>
+          "@
+          # Replace YOUR-GUID-HERE with a new GUID
+          $upgradeGuid = [guid]::NewGuid().ToString().ToUpper()
+          $wxsContent = $wxsContent.Replace("YOUR-GUID-HERE", $upgradeGuid)
+          # Write the .wxs file
+          Set-Content -Path "zed.wxs" -Value $wxsContent
+          Write-Output "WiX configuration created at zed.wxs"
+
+      # Build the MSI installer
+      - name: Build MSI installer
+        shell: pwsh
+        run: |
+          # Compile the .wxs to .wixobj
+          candle.exe zed.wxs -o zed.wixobj
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "WiX candle failed"
+            exit 1
+          }
+          # Link the .wixobj to .msi
+          light.exe zed.wixobj -o zed-installer.msi -ext WixUIExtension
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "WiX light failed"
+            exit 1
+          }
+          Write-Output "MSI installer created at zed-installer.msi"
+
+      # Verify the MSI exists
+      - name: Verify MSI
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "zed-installer.msi")) {
+            Write-Error "MSI not found at zed-installer.msi"
+            exit 1
+          }
+          Write-Output "MSI found: zed-installer.msi"
+
+      # Upload MSI as artifact (for PRs and debugging)
+      - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: zed-windows-executable
-          path: target/release/zed.exe
+          name: zed-windows-installer
+          path: zed-installer.msi
           retention-days: 5
+
+      # Publish MSI to GitHub Releases (only on push to main)
+      - name: Publish MSI to GitHub Releases
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: zed-installer.msi
+          tag_name: v${{ github.run_number }}
+          name: Zed Installer v${{ github.run_number }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
 env:
   CARGO_TERM_COLOR: always
-  
