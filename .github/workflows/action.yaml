@@ -1,0 +1,96 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    env:
+      CARGO_HOME: D:\cargo  # Use D: drive for shorter path
+
+    steps:
+      # Checkout the repository
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive  # Ensure submodules are checked out
+
+      # Configure Git for long paths as a fallback
+      - name: Configure Git for long paths
+        shell: pwsh
+        run: |
+          git config --system core.longpaths true
+          Write-Output "Git configured to handle long paths"
+
+      # Create CARGO_HOME directory on D: drive
+      - name: Set up CARGO_HOME
+        shell: pwsh
+        run: |
+          New-Item -Path "$env:CARGO_HOME" -ItemType Directory -Force
+          Write-Output "CARGO_HOME set to $env:CARGO_HOME"
+          # Verify D: drive is accessible
+          if (-Not (Test-Path "D:\")) {
+            Write-Error "D: drive is not accessible"
+            exit 1
+          }
+          Write-Output "D: drive is accessible"
+
+      # Install Rust toolchain
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      # Cache Rust dependencies and build artifacts
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+          cache-on-failure: true
+          prefix-key: "v1-windows-cargo-home-d-drive"  # Unique cache key for D:\cargo
+
+      # Install Windows dependencies (if needed)
+      - name: Install Windows dependencies
+        shell: pwsh
+        run: |
+          # Add any required tools or libraries here
+          # Example: choco install pkgconfiglite
+          Write-Output "Windows dependencies setup complete"
+
+      # Build the release executable for zed
+      - name: Build release executable
+        run: cargo build --release --package zed
+        env:
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
+          CARGO_PROFILE_RELEASE_LTO: thin
+
+      # Verify the executable exists
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-Not (Test-Path "target\release\zed.exe")) {
+            Write-Error "Executable not found at target\release\zed.exe"
+            exit 1
+          }
+          Write-Output "Executable found: target\release\zed.exe"
+
+      # Upload the executable as an artifact
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-executable
+          path: target/release/zed.exe
+          retention-days: 5
+
+env:
+  CARGO_TERM_COLOR: always
+  
